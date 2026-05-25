@@ -1,0 +1,110 @@
+# ---------------------------------------------------------------------------
+# Deploy to Dev – triggered automatically when the CI workflow completes
+# successfully on main.
+#
+# Flow:
+#   1. Download the image tag artifact produced by CI
+#   2. Authenticate to AWS via OIDC (no long-lived keys)
+#   3. Update kubeconfig for the target EKS cluster
+#   4. terraform apply  (dev environment)
+#   5. Smoke test (placeholder)
+#
+# Required GitHub secrets:
+#   AWS_ROLE_ARN        – IAM role with EKS + S3 + DynamoDB permissions
+#   AWS_ACCOUNT_ID      – 12-digit AWS account ID
+#   EKS_CLUSTER_NAME    – EKS cluster name
+#
+# Required GitHub Environment:
+#   "dev" – no approval gate (deploys automatically)
+# ---------------------------------------------------------------------------
+name: Deploy to Dev
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy-dev:
+    name: Terraform Apply – Dev
+    runs-on: ubuntu-latest
+    # Only run when CI succeeded
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write   # required for OIDC
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      # -----------------------------------------------------------------------
+      # Download the image tag written by CI
+      # -----------------------------------------------------------------------
+      - name: Download image tag artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tag
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Read image tag
+        id: image
+        run: echo "tag=$(cat image_tag.txt)" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # AWS + kubeconfig
+      # -----------------------------------------------------------------------
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region us-east-1 \
+            --name "${{ secrets.EKS_CLUSTER_NAME }}" \
+            --kubeconfig /tmp/kubeconfig
+
+      # -----------------------------------------------------------------------
+      # Terraform
+      # -----------------------------------------------------------------------
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10"
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: terraform/environments/dev
+
+      - name: Terraform Plan
+        run: |
+          terraform plan \
+            -var="image=${{ steps.image.outputs.tag }}" \
+            -var="kube_context=arn:aws:eks:us-east-1:${{ secrets.AWS_ACCOUNT_ID }}:cluster/${{ secrets.EKS_CLUSTER_NAME }}" \
+            -out=tfplan
+        working-directory: terraform/environments/dev
+        env:
+          KUBECONFIG: /tmp/kubeconfig
+
+      - name: Terraform Apply
+        run: terraform apply tfplan
+        working-directory: terraform/environments/dev
+        env:
+          KUBECONFIG: /tmp/kubeconfig
+
+      # -----------------------------------------------------------------------
+      # Smoke test
+      # -----------------------------------------------------------------------
+      # TODO: replace with a real HTTP check, e.g.:
+      #   curl -sf http://dev.helloworld.example.com/ | grep "Hello from Docker"
+      - name: Smoke test (placeholder)
+        run: |
+          echo "TODO: curl http://dev.helloworld.example.com/ and assert HTTP 200 + expected body."
+          exit 0

@@ -1,0 +1,217 @@
+# ---------------------------------------------------------------------------
+# CI – runs on every push and pull request targeting main.
+#
+# Jobs:
+#   lint                 → Python flake8 + Terraform fmt check
+#   test                 → Unit tests (placeholder)
+#   security-scan        → SAST (placeholder)
+#   build-push           → Docker build → push to GHCR (main branch only)
+#   image-scan           → Container image scan (placeholder)
+#   observability-check  → Metrics / alerts / dashboards validation (placeholder)
+#   tf-validate          → terraform validate for both environments
+#
+# The image is tagged with the 7-char git short-SHA and also :latest on main.
+# The tag is saved as an Actions artifact so downstream workflows can consume it
+# without re-computing it.
+# ---------------------------------------------------------------------------
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # --------------------------------------------------------------------------
+  lint:
+  # --------------------------------------------------------------------------
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install flake8
+        run: pip install flake8
+
+      - name: Lint Python
+        run: flake8 app/app.py --max-line-length=120
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10"
+
+      - name: Terraform fmt check
+        run: terraform fmt -check -recursive
+        working-directory: terraform
+
+  # --------------------------------------------------------------------------
+  test:
+  # --------------------------------------------------------------------------
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # TODO: replace with `pip install pytest && pytest app/tests/`
+      - name: Run unit tests (placeholder)
+        run: |
+          echo "No tests yet – add pytest tests under app/tests/ and replace this step."
+          exit 0
+
+  # --------------------------------------------------------------------------
+  security-scan:
+  # --------------------------------------------------------------------------
+    name: Security Scan (SAST)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      # TODO: replace with bandit or semgrep action, e.g.:
+      #   uses: semgrep/semgrep-action@v1
+      #   with:
+      #     config: p/python
+      - name: SAST scan (placeholder)
+        run: |
+          echo "No SAST tool wired up yet – integrate bandit or semgrep here."
+          exit 0
+
+  # --------------------------------------------------------------------------
+  build-push:
+  # --------------------------------------------------------------------------
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: [test, security-scan]
+    # Only push on commits to main; PRs only build (no push)
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=ghcr.io/${{ env.IMAGE_NAME }}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          push: true
+          tags: |
+            ${{ steps.tag.outputs.image_tag }}
+            ghcr.io/${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Save the tag so deploy-dev can download it via workflow_run artifacts
+      - name: Save image tag artifact
+        run: echo "${{ steps.tag.outputs.image_tag }}" > image_tag.txt
+
+      - name: Upload image tag artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-tag
+          path: image_tag.txt
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  image-scan:
+  # --------------------------------------------------------------------------
+    name: Container Image Scan
+    runs-on: ubuntu-latest
+    needs: build-push
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      # TODO: replace with Trivy or Grype, e.g.:
+      #   uses: aquasecurity/trivy-action@master
+      #   with:
+      #     image-ref: ghcr.io/${{ github.repository }}:<tag>
+      #     exit-code: 1
+      #     severity: CRITICAL,HIGH
+      - name: Container image scan (placeholder)
+        run: |
+          echo "No image scanner wired up yet – integrate Trivy or Grype here."
+          exit 0
+
+  # --------------------------------------------------------------------------
+  observability-check:
+  # --------------------------------------------------------------------------
+    name: Observability Check
+    runs-on: ubuntu-latest
+    needs: build-push
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      # TODO: add real observability validation steps, e.g.:
+      #   - Verify /metrics endpoint exists (Prometheus scrape target)
+      #   - Validate alert rule YAML with promtool
+      #   - Lint Grafana dashboard JSON
+      #   - Check OpenTelemetry instrumentation is present
+      - name: Observability check (placeholder)
+        run: |
+          echo "TODO: validate metrics endpoint, alert rules, and dashboard definitions."
+          exit 0
+
+  # --------------------------------------------------------------------------
+  tf-validate:
+  # --------------------------------------------------------------------------
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10"
+
+      - name: Terraform init + validate (dev)
+        run: |
+          terraform init -backend=false
+          terraform validate
+        working-directory: terraform/environments/dev
+
+      - name: Terraform init + validate (prod)
+        run: |
+          terraform init -backend=false
+          terraform validate
+        working-directory: terraform/environments/prod
