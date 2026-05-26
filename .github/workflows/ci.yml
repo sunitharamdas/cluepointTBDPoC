@@ -119,8 +119,10 @@ jobs:
         id: tag
         run: |
           SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+          IMAGE_LC=$(echo "ghcr.io/${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "image_tag=ghcr.io/${{ env.IMAGE_NAME }}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_LC}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_base=${IMAGE_LC}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -132,7 +134,7 @@ jobs:
           push: true
           tags: |
             ${{ steps.tag.outputs.image_tag }}
-            ghcr.io/${{ env.IMAGE_NAME }}:latest
+            ${{ steps.tag.outputs.image_base }}:latest
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
