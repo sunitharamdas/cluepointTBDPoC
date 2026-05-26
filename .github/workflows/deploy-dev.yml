@@ -3,14 +3,16 @@
 # successfully on main.
 #
 # Flow:
-#   1. Download the image tag artifact produced by CI
-#   2. Authenticate to AWS via OIDC (no long-lived keys)
-#   3. Update kubeconfig for the target EKS cluster
-#   4. terraform apply  (dev environment)
-#   5. Smoke test (placeholder)
+#   1. check-secrets  – detect whether AWS secrets are configured; skip all
+#                       deployment steps if they are not (clean skip > red fail)
+#   2. Download the image tag artifact produced by CI
+#   3. Authenticate to AWS via OIDC (no long-lived keys)
+#   4. Update kubeconfig for the target EKS cluster
+#   5. terraform apply  (dev environment)
+#   6. Smoke test (placeholder)
 #
-# Required GitHub secrets:
-#   AWS_ROLE_ARN        – IAM role with EKS + S3 + DynamoDB permissions
+# Required GitHub secrets (set these to enable real deployments):
+#   AWS_ROLE_ARN        – IAM role with EKS + S3 permissions
 #   AWS_ACCOUNT_ID      – 12-digit AWS account ID
 #   EKS_CLUSTER_NAME    – EKS cluster name
 #
@@ -26,11 +28,40 @@ on:
     branches: [main]
 
 jobs:
+  # --------------------------------------------------------------------------
+  # Gate: detect whether AWS secrets are present.
+  # Secrets cannot be read directly in job-level `if` expressions, so we
+  # expose presence as a boolean output via an env-var check.
+  # --------------------------------------------------------------------------
+  check-secrets:
+    name: Check deployment secrets
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    outputs:
+      has-aws: ${{ steps.check.outputs.has-aws }}
+    steps:
+      - name: Detect AWS secrets
+        id: check
+        env:
+          SECRET: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          if [[ -n "$SECRET" ]]; then
+            echo "has-aws=true"  >> "$GITHUB_OUTPUT"
+            echo "AWS secrets are configured – deployment will proceed."
+          else
+            echo "has-aws=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::AWS_ROLE_ARN secret is not set. Skipping deployment to dev."
+            echo "Add AWS_ROLE_ARN, AWS_ACCOUNT_ID, and EKS_CLUSTER_NAME as repository secrets to enable real deployments."
+          fi
+
+  # --------------------------------------------------------------------------
+  # Deploy: only runs when check-secrets confirms secrets exist
+  # --------------------------------------------------------------------------
   deploy-dev:
     name: Terraform Apply – Dev
     runs-on: ubuntu-latest
-    # Only run when CI succeeded
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    needs: check-secrets
+    if: ${{ needs.check-secrets.outputs.has-aws == 'true' }}
     environment: dev
     permissions:
       contents: read
