@@ -1,0 +1,108 @@
+# ---------------------------------------------------------------------------
+# Deploy to Prod – manually triggered with an explicit approval gate.
+#
+# Trunk-based promotion policy:
+#   A human operator triggers this workflow with the image tag that was
+#   validated in dev. The "production" GitHub Environment requires at least
+#   one reviewer to approve before Terraform runs.
+#
+# Flow:
+#   1. Operator triggers workflow_dispatch and supplies the image tag
+#   2. GitHub pauses at the "production" environment gate until a reviewer approves
+#   3. On approval: authenticate → update kubeconfig → terraform apply (prod)
+#   4. Acceptance test (placeholder)
+#
+# Required GitHub secrets (same as dev):
+#   AWS_ROLE_ARN, AWS_ACCOUNT_ID, EKS_CLUSTER_NAME
+#
+# Required GitHub Environment:
+#   "production" – configure required reviewers in Settings → Environments
+# ---------------------------------------------------------------------------
+name: Deploy to Prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: >
+          Full image tag to deploy, e.g. ghcr.io/org/repo:abc1234.
+          Must be a tag that was already successfully deployed to dev.
+        required: true
+        type: string
+
+jobs:
+  deploy-prod:
+    name: Terraform Apply – Prod
+    runs-on: ubuntu-latest
+    environment: production   # ← approval gate is configured here in GitHub UI
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # AWS + kubeconfig
+      # -----------------------------------------------------------------------
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region us-east-1 \
+            --name "${{ secrets.EKS_CLUSTER_NAME }}" \
+            --kubeconfig /tmp/kubeconfig
+
+      # -----------------------------------------------------------------------
+      # Terraform
+      # -----------------------------------------------------------------------
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10"
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: terraform/environments/prod
+
+      - name: Terraform Plan
+        run: |
+          terraform plan \
+            -var="image=${{ inputs.image_tag }}" \
+            -var="kube_context=arn:aws:eks:us-east-1:${{ secrets.AWS_ACCOUNT_ID }}:cluster/${{ secrets.EKS_CLUSTER_NAME }}" \
+            -out=tfplan
+        working-directory: terraform/environments/prod
+        env:
+          KUBECONFIG: /tmp/kubeconfig
+
+      - name: Terraform Apply
+        run: terraform apply tfplan
+        working-directory: terraform/environments/prod
+        env:
+          KUBECONFIG: /tmp/kubeconfig
+
+      # -----------------------------------------------------------------------
+      # Acceptance test
+      # -----------------------------------------------------------------------
+      # TODO: replace with a real check, e.g.:
+      #   RESPONSE=$(curl -sf http://helloworld.example.com/)
+      #   echo "$RESPONSE" | grep "Hello from Docker" || exit 1
+      - name: Acceptance test (placeholder)
+        run: |
+          echo "TODO: curl http://helloworld.example.com/ and assert HTTP 200 + 'Hello from Docker!'."
+          exit 0
+
+      # -----------------------------------------------------------------------
+      # Audit trail – record which image was deployed and who approved
+      # -----------------------------------------------------------------------
+      - name: Record deployment
+        if: success()
+        run: |
+          echo "Deployed ${{ inputs.image_tag }} to prod"
+          echo "Triggered by: ${{ github.actor }}"
+          echo "Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
