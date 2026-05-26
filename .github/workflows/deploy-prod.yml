@@ -7,10 +7,12 @@
 #   one reviewer to approve before Terraform runs.
 #
 # Flow:
-#   1. Operator triggers workflow_dispatch and supplies the image tag
-#   2. GitHub pauses at the "production" environment gate until a reviewer approves
-#   3. On approval: authenticate → update kubeconfig → terraform apply (prod)
-#   4. Acceptance test (placeholder)
+#   1. check-secrets  – detect whether AWS secrets are configured; skip all
+#                       deployment steps if they are not (clean skip > red fail)
+#   2. Operator triggers workflow_dispatch and supplies the image tag
+#   3. GitHub pauses at the "production" environment gate until a reviewer approves
+#   4. On approval: authenticate → update kubeconfig → terraform apply (prod)
+#   5. Acceptance test (placeholder)
 #
 # Required GitHub secrets (same as dev):
 #   AWS_ROLE_ARN, AWS_ACCOUNT_ID, EKS_CLUSTER_NAME
@@ -31,9 +33,37 @@ on:
         type: string
 
 jobs:
+  # --------------------------------------------------------------------------
+  # Gate: detect whether AWS secrets are present.
+  # --------------------------------------------------------------------------
+  check-secrets:
+    name: Check deployment secrets
+    runs-on: ubuntu-latest
+    outputs:
+      has-aws: ${{ steps.check.outputs.has-aws }}
+    steps:
+      - name: Detect AWS secrets
+        id: check
+        env:
+          SECRET: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          if [[ -n "$SECRET" ]]; then
+            echo "has-aws=true"  >> "$GITHUB_OUTPUT"
+            echo "AWS secrets are configured – deployment will proceed."
+          else
+            echo "has-aws=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::AWS_ROLE_ARN secret is not set. Skipping deployment to prod."
+            echo "Add AWS_ROLE_ARN, AWS_ACCOUNT_ID, and EKS_CLUSTER_NAME as repository secrets to enable real deployments."
+          fi
+
+  # --------------------------------------------------------------------------
+  # Deploy: only runs when check-secrets confirms secrets exist
+  # --------------------------------------------------------------------------
   deploy-prod:
     name: Terraform Apply – Prod
     runs-on: ubuntu-latest
+    needs: check-secrets
+    if: ${{ needs.check-secrets.outputs.has-aws == 'true' }}
     environment: production   # ← approval gate is configured here in GitHub UI
     permissions:
       contents: read
