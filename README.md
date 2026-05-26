@@ -163,27 +163,115 @@ Hello from Docker!
 ### Validate Kubernetes manifests locally
 
 Use `terraform plan` with a dry-run backend to catch syntax and schema errors
-without touching the real cluster:
+without touching any cluster:
 
 ```bash
 cd terraform/environments/dev
-terraform init -backend=false
+terraform init -backend=false -reconfigure
 terraform validate
 terraform plan \
   -var="image=ghcr.io/org/helloworld-demo-python:abc1234" \
   -var="kube_context=<your-local-context>"
 ```
 
-To validate against your actual cluster (e.g. a local `kind` cluster):
+### Full local deployment with kind (no cloud account needed)
+
+`kind` runs a real Kubernetes cluster inside Docker — useful for end-to-end
+testing and demonstrating the stack without AWS.
+
+#### Prerequisites
 
 ```bash
-# Start a local kind cluster
-kind create cluster --name local-dev
+brew install kind kubectl
+```
 
-# Point Terraform at it
-terraform plan \
+#### 1. Create a local cluster
+
+```bash
+kind create cluster --name demo
+```
+
+#### 2. Install the nginx ingress controller
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+kubectl wait --namespace ingress-nginx \
+  --for=condition=ready pod \
+  --selector=app.kubernetes.io/component=controller \
+  --timeout=90s
+```
+
+#### 3. Build the image and load it into kind
+
+GHCR images are built for `linux/amd64` (CI). On Apple Silicon the kind node
+runs `linux/arm64`, so build locally and load directly — no registry pull needed.
+
+```bash
+docker build -t helloworld-demo:local ./app
+kind load docker-image helloworld-demo:local --name demo
+```
+
+#### 4. Apply Terraform with a local state file (no S3 needed)
+
+```bash
+cd terraform/environments/dev
+
+# Move the S3 backend config aside so Terraform falls back to local state
+mv backend.tf backend.tf.bak
+
+terraform init -reconfigure
+terraform apply \
   -var="image=helloworld-demo:local" \
-  -var="kube_context=kind-local-dev"
+  -var="kube_context=kind-demo"
+```
+
+#### 5. Verify the deployment
+
+```bash
+kubectl get pods,svc,ingress -n helloworld-dev
+```
+
+Expected: pod status `Running`, service `helloworld`, ingress with host
+`dev.helloworld.example.com`.
+
+#### 6. Test the app
+
+Ingress requires real DNS; use `port-forward` to bypass it locally:
+
+```bash
+kubectl port-forward svc/helloworld 9090:80 -n helloworld-dev &
+curl http://localhost:9090/
+```
+
+Expected output:
+
+```
+         ##         .
+   ## ## ##        ==
+## ## ## ## ##    ===
+/"""""""""""""""""\___/ ===
+{                       /  ===-
+\______ O           __/
+ \    \         __/
+  \____\_______/
+
+
+Hello from Docker!
+```
+
+#### 7. Clean up
+
+```bash
+# Kill the port-forward
+kill %1
+
+# Restore the S3 backend config
+mv backend.tf.bak backend.tf
+rm -f terraform/environments/dev/terraform.tfstate \
+       terraform/environments/dev/terraform.tfstate.backup
+
+# Delete the kind cluster
+kind delete cluster --name demo
 ```
 
 ---
