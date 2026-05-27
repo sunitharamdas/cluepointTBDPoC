@@ -1,15 +1,16 @@
 # ---------------------------------------------------------------------------
-# Deploy to Prod – manually triggered with an explicit approval gate.
+# Deploy to Prod – triggered automatically when Deploy to Dev succeeds,
+# but pauses at the "production" GitHub Environment approval gate before
+# any Terraform runs. A human reviewer must approve – no manual trigger needed.
 #
 # Trunk-based promotion policy:
-#   A human operator triggers this workflow with the image tag that was
-#   validated in dev. The "production" GitHub Environment requires at least
-#   one reviewer to approve before Terraform runs.
+#   Code merged to main → CI → Dev auto-deploy → Prod auto-triggered
+#   → paused for approval → approved → Prod deployed.
 #
 # Flow:
 #   1. check-secrets  – detect whether AWS secrets are configured; skip all
 #                       deployment steps if they are not (clean skip > red fail)
-#   2. Operator triggers workflow_dispatch and supplies the image tag
+#   2. Derive the image tag from the triggering commit SHA (same tag CI pushed)
 #   3. GitHub pauses at the "production" environment gate until a reviewer approves
 #   4. On approval: authenticate → update kubeconfig → terraform apply (prod)
 #   5. Acceptance test (placeholder)
@@ -23,14 +24,10 @@
 name: Deploy to Prod
 
 on:
-  workflow_dispatch:
-    inputs:
-      image_tag:
-        description: >
-          Full image tag to deploy, e.g. ghcr.io/org/repo:abc1234.
-          Must be a tag that was already successfully deployed to dev.
-        required: true
-        type: string
+  workflow_run:
+    workflows: ["Deploy to Dev"]
+    types: [completed]
+    branches: [main]
 
 jobs:
   # --------------------------------------------------------------------------
@@ -39,6 +36,7 @@ jobs:
   check-secrets:
     name: Check deployment secrets
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     outputs:
       has-aws: ${{ steps.check.outputs.has-aws }}
     steps:
@@ -71,6 +69,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      # -----------------------------------------------------------------------
+      # Derive image tag from the commit SHA that triggered this pipeline
+      # -----------------------------------------------------------------------
+      - name: Derive image tag
+        id: tag
+        run: |
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          SHORT_SHA=$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-7)
+          echo "image_tag=ghcr.io/${REPO_LC}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
       # -----------------------------------------------------------------------
       # AWS + kubeconfig
@@ -103,7 +113,7 @@ jobs:
       - name: Terraform Plan
         run: |
           terraform plan \
-            -var="image=${{ inputs.image_tag }}" \
+            -var="image=${{ steps.tag.outputs.image_tag }}" \
             -var="kube_context=arn:aws:eks:us-east-1:${{ secrets.AWS_ACCOUNT_ID }}:cluster/${{ secrets.EKS_CLUSTER_NAME }}" \
             -out=tfplan
         working-directory: terraform/environments/prod
@@ -133,6 +143,6 @@ jobs:
       - name: Record deployment
         if: success()
         run: |
-          echo "Deployed ${{ inputs.image_tag }} to prod"
+          echo "Deployed ${{ steps.tag.outputs.image_tag }} to prod"
           echo "Triggered by: ${{ github.actor }}"
           echo "Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
